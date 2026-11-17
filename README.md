@@ -36,7 +36,7 @@ We built it at [Mulga](https://mulgadc.com) to manage Spinifex, the control plan
 
 `bd` is complete but text-only, and some questions are far easier to answer visually — what is blocked on what, which epic is stalling, where the work has piled up.
 
-- **No second source of truth.** Every read and write goes through `bd`, so validation, IDs, history and hooks behave exactly as they do on the command line. The server keeps no store of its own, which means nothing to back up, migrate or keep in sync.
+- **No second source of truth.** Every write goes through `bd`, so validation, IDs, history and hooks behave exactly as they do on the command line. Reads are served from an in-memory copy loaded from `bd export` and kept current by `bd`'s events journal. Nothing is written to disk, so there is nothing to back up or migrate.
 - **Works on the repo you already have.** Point `MAGGIE_BEADS_DIR` at any checkout with a `.beads/` directory.
 - **Filtering that composes.** Text, id globs, priority, type, assignee, label and status, applied together rather than one at a time. One filter bar drives every view, and the filters live in the URL, so a view is a link you can share.
 - **A dependency graph.** Force-directed, blockers and parent/child drawn differently, optionally clustered by label. It shows what is holding a bead up in a way a list cannot.
@@ -117,6 +117,19 @@ All configuration is environment variables. There is no config file.
 | `MAGGIE_BD_BIN` | `bd` | Path to the `bd` binary |
 | `MAGGIE_ACTORS` | — | Comma-separated identity roster for the edit picker |
 | `MAGGIE_LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error` |
+| `MAGGIE_RESYNC` | `5m` | How often to re-read the whole workspace with `bd export`, to pick up changes the events journal does not record, such as a `bd dolt pull` |
+
+### Live updates and the events journal
+
+Maggie loads the workspace once with `bd export` and answers reads from memory. Open pages get a server-sent event when the data changes and refetch straight away.
+
+Turn on the beads events journal (beads 1.3 or later) so maggie can follow changes as they happen:
+
+```bash
+bd config set events-journal true
+```
+
+With the journal on, one `bd events tail --follow` process keeps the copy current, and a change made with `bd` reaches open pages within about a second. With it off, maggie re-runs `bd export` every 10 seconds while someone is viewing, and stops when nobody is. Maggie checks again every `MAGGIE_RESYNC` and switches to following once the journal is on.
 
 ## Deployment
 

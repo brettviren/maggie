@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/mulgadc/maggie/internal/beads"
+	"github.com/mulgadc/maggie/internal/store"
 )
 
 // As in internal/beads, the stub bd is this test binary re-execed: TestMain
@@ -72,7 +73,7 @@ func newServer(t *testing.T, mode string, actors []string) (*http.Client, string
 		"favicon.ico":    {Data: []byte("icon")},
 		"assets/app.css": {Data: []byte("body{}")},
 	}
-	srv := httptest.NewServer(routes(bd, actors, web))
+	srv := httptest.NewServer(routes(bd, store.New(bd, store.Options{}), actors, web))
 	t.Cleanup(srv.Close)
 	return srv.Client(), srv.URL, argv
 }

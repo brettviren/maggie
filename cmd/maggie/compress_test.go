@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/mulgadc/maggie/internal/beads"
+	"github.com/mulgadc/maggie/internal/store"
 )
 
 // handler returns a handler writing body with the given content type and status.
@@ -211,7 +212,7 @@ func TestCompressAppliesToTheSPABundle(t *testing.T) {
 		"assets/app.js": {Data: []byte(strings.Repeat("console.log(1);", 200))},
 	}
 	bd := beads.New("bd", t.TempDir(), time.Second)
-	srv := httptest.NewServer(handlerChain(routes(bd, nil, web)))
+	srv := httptest.NewServer(handlerChain(routes(bd, store.New(bd, store.Options{}), nil, web)))
 	t.Cleanup(srv.Close)
 
 	c := srv.Client()

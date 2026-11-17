@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
+import { useEffect } from "react"
 
 import type { DepType, Issue, UpdatePayload } from "@/api"
 import {
@@ -18,7 +19,51 @@ import {
   scopeNeedsComments,
 } from "@/lib/filter"
 
-const REFETCH_MS = 10_000
+// The server pushes a change event the moment its data moves (see
+// useLiveUpdates), so polling is only a safety net for a dropped stream.
+const REFETCH_MS = 30_000
+
+// useLiveUpdates follows the server's change stream and refetches the active
+// queries whenever the data changes. EventSource reconnects by itself; after a
+// reconnect everything is refetched, since changes may have been missed.
+export function useLiveUpdates() {
+  const qc = useQueryClient()
+
+  useEffect(() => {
+    const es = new EventSource("/api/stream")
+    let seen = ""
+    let connected = false
+
+    // Each event carries the server's data generation; repeats are skipped.
+    const refresh = (gen: string) => {
+      if (gen === seen) {
+        return
+      }
+
+      seen = gen
+      void qc.invalidateQueries()
+    }
+
+    es.addEventListener("hello", (e) => {
+      // A restarted server counts generations from scratch, so a reconnect
+      // refetches regardless of the number it reports.
+      seen = String(e.data)
+
+      if (connected) {
+        void qc.invalidateQueries()
+      }
+
+      connected = true
+    })
+    es.addEventListener("change", (e) => {
+      refresh(String(e.data))
+    })
+
+    return () => {
+      es.close()
+    }
+  }, [qc])
+}
 
 export function useIssues() {
   return useQuery({

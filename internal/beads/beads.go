@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -208,11 +209,98 @@ func (c *Client) AddDep(ctx context.Context, issueID, dependsOn, depType, actor 
 // which is the one bulk read that includes comment text. Issues without
 // comments are omitted.
 func (c *Client) Comments(ctx context.Context) (map[string][]string, error) {
-	out, err := c.run(ctx, "export")
+	out, err := c.Export(ctx)
 	if err != nil {
 		return nil, err
 	}
 	return parseComments(out)
+}
+
+// Export returns the JSONL of `bd export`: one record per issue carrying its
+// labels, dependencies and comments, which is everything maggie displays.
+func (c *Client) Export(ctx context.Context) ([]byte, error) {
+	return c.run(ctx, "export")
+}
+
+// JournalEnabled reports whether the workspace has the events journal on, so
+// that `bd events tail` is a complete record of local mutations. bd resolves
+// the BD_EVENTS_JOURNAL override itself, which it reports as "1".
+func (c *Client) JournalEnabled(ctx context.Context) (bool, error) {
+	out, err := c.run(ctx, "config", "get", "events-journal", "--json")
+	if err != nil {
+		return false, err
+	}
+	var v struct {
+		Value string `json:"value"`
+	}
+	if err := json.Unmarshal(out, &v); err != nil {
+		return false, fmt.Errorf("config get events-journal: %w", err)
+	}
+	switch strings.ToLower(strings.TrimSpace(v.Value)) {
+	case "true", "1", "yes", "on":
+		return true, nil
+	}
+	return false, nil
+}
+
+// maxRecord bounds one JSONL record. A record holds a whole issue, description
+// and comments included, so it can far exceed bufio's 64KiB default.
+const maxRecord = 64 << 20
+
+// Events streams events journal records with seq greater than since, calling
+// fn with each JSON line in order. Without follow it returns once the journal
+// is read. With follow it keeps reading as records are committed until ctx
+// ends, fn fails or bd exits, and is not bound by the per-command timeout.
+// fn's error stops the stream and is returned.
+func (c *Client) Events(ctx context.Context, since int64, follow bool, fn func([]byte) error) error {
+	args := []string{"events", "tail", "--since", strconv.FormatInt(since, 10), "--json"}
+	if follow {
+		args = append(args, "--follow")
+	} else {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, c.timeout)
+		defer cancel()
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, c.bin, args...)
+	cmd.Dir = c.dir
+	cmd.Env = c.env()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("bd %v: %w", args, err)
+	}
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("bd %v: %w", args, err)
+	}
+	sc := bufio.NewScanner(stdout)
+	sc.Buffer(nil, maxRecord)
+	var fnErr error
+	for sc.Scan() {
+		line := bytes.TrimSpace(sc.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		if fnErr = fn(line); fnErr != nil {
+			cancel()
+			break
+		}
+	}
+	scanErr := sc.Err()
+	// Drain what is left so Wait does not block on a full pipe.
+	_, _ = io.Copy(io.Discard, stdout)
+	waitErr := cmd.Wait()
+	switch {
+	case fnErr != nil:
+		return fnErr
+	case scanErr != nil:
+		return fmt.Errorf("bd %v: %w", args, scanErr)
+	case waitErr != nil:
+		return fmt.Errorf("bd %v: %w: %s", args, waitErr, bytes.TrimSpace(stderr.Bytes()))
+	}
+	return nil
 }
 
 // exportRow is the slice of a `bd export` JSONL record that search needs.
@@ -227,9 +315,7 @@ type exportRow struct {
 func parseComments(out []byte) (map[string][]string, error) {
 	byID := map[string][]string{}
 	sc := bufio.NewScanner(bytes.NewReader(out))
-	// A record holds a whole issue, description and comments included, so it
-	// can far exceed bufio's 64KiB default line limit.
-	sc.Buffer(nil, 64<<20)
+	sc.Buffer(nil, maxRecord)
 	for sc.Scan() {
 		line := bytes.TrimSpace(sc.Bytes())
 		if len(line) == 0 {

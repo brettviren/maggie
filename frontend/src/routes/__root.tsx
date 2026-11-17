@@ -20,6 +20,7 @@ import {
   toSortDir,
   toSortKey,
 } from "@/lib/filter"
+import { useLiveUpdates } from "@/queries"
 
 interface RootSearch extends TableSearch {
   issue?: string
@@ -61,6 +62,7 @@ const TABS = [
 ] as const
 
 function RootLayout() {
+  useLiveUpdates()
   const navigate = useNavigate()
   const { pathname } = useLocation()
   const search = Route.useSearch()

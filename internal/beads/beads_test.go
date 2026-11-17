@@ -510,3 +510,108 @@ func TestCommentsSurfacesBdFailure(t *testing.T) {
 		t.Fatal("Comments: want an error when bd fails")
 	}
 }
+
+func TestExportArgs(t *testing.T) {
+	c, argv := newStub(t, "1")
+	t.Setenv(stubOutEnv, "{}\n")
+	out, err := c.Export(t.Context())
+	if err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+	if string(out) != "{}\n" {
+		t.Errorf("out = %q", out)
+	}
+	if got := readArgv(t, argv); !slices.Equal(got, []string{"export"}) {
+		t.Errorf("argv = %q", got)
+	}
+}
+
+func TestJournalEnabled(t *testing.T) {
+	tests := []struct {
+		value string
+		want  bool
+	}{
+		{"true", true},
+		{"1", true}, // how bd reports BD_EVENTS_JOURNAL=1
+		{"On", true},
+		{"false", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.value, func(t *testing.T) {
+			c, argv := newStub(t, "1")
+			t.Setenv(stubOutEnv, `{"key":"events-journal","value":"`+tt.value+`"}`)
+			got, err := c.JournalEnabled(t.Context())
+			if err != nil {
+				t.Fatalf("JournalEnabled: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("enabled = %v, want %v", got, tt.want)
+			}
+			want := []string{"config", "get", "events-journal", "--json"}
+			if a := readArgv(t, argv); !slices.Equal(a, want) {
+				t.Errorf("argv = %q, want %q", a, want)
+			}
+		})
+	}
+}
+
+func TestJournalEnabledRejectsGarbage(t *testing.T) {
+	c, _ := newStub(t, "1")
+	t.Setenv(stubOutEnv, "not json")
+	if _, err := c.JournalEnabled(t.Context()); err == nil {
+		t.Error("want an error for unparseable config output")
+	}
+}
+
+func TestEventsStreamsLines(t *testing.T) {
+	for _, follow := range []bool{false, true} {
+		t.Run(fmt.Sprint("follow=", follow), func(t *testing.T) {
+			c, argv := newStub(t, "1")
+			t.Setenv(stubOutEnv, "{\"seq\":4}\n\n{\"seq\":5}\n")
+			var got []string
+			err := c.Events(t.Context(), 3, follow, func(line []byte) error {
+				got = append(got, string(line))
+				return nil
+			})
+			if err != nil {
+				t.Fatalf("Events: %v", err)
+			}
+			if want := []string{`{"seq":4}`, `{"seq":5}`}; !slices.Equal(got, want) {
+				t.Errorf("lines = %q, want %q", got, want)
+			}
+			want := []string{"events", "tail", "--since", "3", "--json"}
+			if follow {
+				want = append(want, "--follow")
+			}
+			if a := readArgv(t, argv); !slices.Equal(a, want) {
+				t.Errorf("argv = %q, want %q", a, want)
+			}
+		})
+	}
+}
+
+func TestEventsStopsOnCallbackError(t *testing.T) {
+	c, _ := newStub(t, "1")
+	t.Setenv(stubOutEnv, "{\"seq\":1}\n{\"seq\":2}\n")
+	stop := fmt.Errorf("stop")
+	calls := 0
+	err := c.Events(t.Context(), 0, false, func([]byte) error {
+		calls++
+		return stop
+	})
+	if err != stop {
+		t.Errorf("err = %v, want the callback's error", err)
+	}
+	if calls != 1 {
+		t.Errorf("callback ran %d times, want 1", calls)
+	}
+}
+
+func TestEventsSurfacesBdFailure(t *testing.T) {
+	c, _ := newStub(t, "fail")
+	err := c.Events(t.Context(), 0, false, func([]byte) error { return nil })
+	if err == nil || !strings.Contains(err.Error(), stubStderr) {
+		t.Errorf("err = %v, want bd's stderr in it", err)
+	}
+}

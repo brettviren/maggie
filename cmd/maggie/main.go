@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/mulgadc/maggie/internal/beads"
+	"github.com/mulgadc/maggie/internal/store"
 )
 
 // Version is set via ldflags at build time.
@@ -59,6 +60,12 @@ func main() {
 
 	bd := beads.New(bin, dir, bdTimeout)
 	actors := splitActors(os.Getenv("MAGGIE_ACTORS"))
+	resync, err := time.ParseDuration(envOr("MAGGIE_RESYNC", "5m"))
+	if err != nil || resync <= 0 {
+		slog.Error("MAGGIE_RESYNC must be a positive duration", "value", os.Getenv("MAGGIE_RESYNC"))
+		os.Exit(1)
+	}
+	st := store.New(bd, store.Options{Resync: resync})
 
 	sub, err := fs.Sub(webFS, "web")
 	if err != nil {
@@ -66,11 +73,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	slog.Info("maggie listening", "addr", addr, "beads_dir", dir)
-	srv := httpServer(addr, handlerChain(routes(bd, actors, sub)))
-
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	go st.Run(ctx)
+
+	slog.Info("maggie listening", "addr", addr, "beads_dir", dir)
+	srv := httpServer(addr, handlerChain(routes(bd, st, actors, sub)))
 	if err := serve(ctx, srv); err != nil {
 		slog.Error("serve", "err", err)
 		os.Exit(1)
@@ -150,36 +158,51 @@ func serve(ctx context.Context, srv *http.Server) error {
 	return <-errCh
 }
 
-// routes wires the bd-backed API and the embedded SPA onto a mux.
-func routes(bd *beads.Client, actors []string, web fs.FS) *http.ServeMux {
+// routes wires the bd-backed API and the embedded SPA onto a mux. Reads are
+// answered from st once it has loaded, and go to bd directly until then.
+func routes(bd *beads.Client, st *store.Store, actors []string, web fs.FS) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.Handle("/", spaHandler(web))
 	mux.HandleFunc("/health", healthHandler)
+	mux.HandleFunc("/api/stream", streamHandler(st))
 	mux.HandleFunc("/api/ready", jsonHandler(func(r *http.Request) ([]byte, error) {
+		if st.Loaded() {
+			// bd computes readiness (blockers, deferral, parents), so the
+			// store only caches its answer until the next change.
+			return st.Memo(r.Context(), "ready", bd.Ready)
+		}
 		return bd.Ready(r.Context())
 	}))
 	mux.HandleFunc("/api/issues", jsonHandler(func(r *http.Request) ([]byte, error) {
-		return bd.List(r.Context(), parseList(r))
+		o := parseList(r)
+		if st.Loaded() && o.All && o.Status == "" && o.Priority == "" &&
+			(o.Limit == 0 || o.Limit == maxListLimit) {
+			return st.List()
+		}
+		return bd.List(r.Context(), o)
 	}))
 	mux.HandleFunc("/api/issue", jsonHandler(func(r *http.Request) ([]byte, error) {
 		id := r.URL.Query().Get("id")
 		if !idRe.MatchString(id) {
 			return nil, errBadRequest("invalid id")
 		}
+		if st.Loaded() {
+			if out, err := st.Show(id); err == nil {
+				return out, nil
+			}
+		}
 		return bd.Show(r.Context(), id)
 	}))
-	mux.HandleFunc("/api/comments", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/comments", jsonHandler(func(r *http.Request) ([]byte, error) {
+		if st.Loaded() {
+			return st.Comments()
+		}
 		byID, err := bd.Comments(r.Context())
 		if err != nil {
-			slog.Error("comments", "err", err)
-			http.Error(w, "comments failed", http.StatusBadGateway)
-			return
+			return nil, err
 		}
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(byID); err != nil {
-			slog.Error("comments encode", "err", err)
-		}
-	})
+		return json.Marshal(byID)
+	}))
 	mux.HandleFunc("/api/actors", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(actors); err != nil {
@@ -199,7 +222,7 @@ func routes(bd *beads.Client, actors []string, web fs.FS) *http.ServeMux {
 			return "", err
 		}
 		return b.ID, bd.Update(r.Context(), b.ID, f, b.Actor)
-	}, bd))
+	}, bd, st))
 	mux.HandleFunc("/api/issue/comment", writeHandler(func(r *http.Request) (string, error) {
 		var b commentBody
 		if err := decode(r, &b); err != nil {
@@ -212,7 +235,7 @@ func routes(bd *beads.Client, actors []string, web fs.FS) *http.ServeMux {
 			return "", errBadRequest("empty comment")
 		}
 		return b.ID, bd.AddComment(r.Context(), b.ID, b.Text, b.Actor)
-	}, bd))
+	}, bd, st))
 	mux.HandleFunc("/api/issue/dep", writeHandler(func(r *http.Request) (string, error) {
 		var b depBody
 		if err := decode(r, &b); err != nil {
@@ -228,8 +251,17 @@ func routes(bd *beads.Client, actors []string, web fs.FS) *http.ServeMux {
 			return "", errBadRequest("cannot depend on self")
 		}
 		return b.ID, bd.AddDep(r.Context(), b.ID, b.DependsOn, b.Type, b.Actor)
-	}, bd))
+	}, bd, st))
 	mux.HandleFunc("/api/graph", func(w http.ResponseWriter, r *http.Request) {
+		if st.Loaded() {
+			out, err := st.Graph()
+			if err == nil {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write(out)
+				return
+			}
+			slog.Error("graph render", "err", err)
+		}
 		edges, err := bd.GraphEdges(r.Context())
 		if err != nil {
 			slog.Error("graph", "err", err)
@@ -319,6 +351,10 @@ func assetCacheControl(p string) string {
 }
 
 // parseList builds ListOpts from allowlisted, validated query params.
+// maxListLimit is the largest list the API asks bd for; the UI asks for it to
+// mean "everything".
+const maxListLimit = 100000
+
 func parseList(r *http.Request) beads.ListOpts {
 	q := r.URL.Query()
 	o := beads.ListOpts{All: q.Get("all") == "true"}
@@ -328,7 +364,7 @@ func parseList(r *http.Request) beads.ListOpts {
 	if p := q.Get("priority"); priorityRe.MatchString(p) {
 		o.Priority = p
 	}
-	if n, err := strconv.Atoi(q.Get("limit")); err == nil && n > 0 && n <= 100000 {
+	if n, err := strconv.Atoi(q.Get("limit")); err == nil && n > 0 && n <= maxListLimit {
 		o.Limit = n
 	}
 	return o
@@ -414,9 +450,11 @@ func (b updateBody) actor() string  { return b.Actor }
 func (b commentBody) actor() string { return b.Actor }
 func (b depBody) actor() string     { return b.Actor }
 
-// writeHandler runs a bd mutation then returns the fresh issue JSON (bd show) so
-// clients can update their cache without a round-trip.
-func writeHandler(fn func(*http.Request) (string, error), bd *beads.Client) http.HandlerFunc {
+// writeHandler runs a bd mutation then returns the fresh issue JSON so clients
+// can update their cache without a round-trip. The store is brought up to date
+// first, so the reply and every read after it include the write; bd show is the
+// fallback when it cannot be.
+func writeHandler(fn func(*http.Request) (string, error), bd *beads.Client, st *store.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id, err := fn(r)
 		if err != nil {
@@ -427,6 +465,15 @@ func writeHandler(fn func(*http.Request) (string, error), bd *beads.Client) http
 			slog.Error("write", "path", r.URL.Path, "err", err)
 			http.Error(w, "upstream bd failed", http.StatusBadGateway)
 			return
+		}
+		if st.Loaded() {
+			if err := st.Sync(r.Context()); err != nil {
+				slog.Warn("write sync", "id", id, "err", err)
+			} else if out, err := st.Show(id); err == nil {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write(out)
+				return
+			}
 		}
 		out, err := bd.Show(r.Context(), id)
 		if err != nil {
@@ -480,4 +527,53 @@ func envOr(k, def string) string {
 		return v
 	}
 	return def
+}
+
+// streamHeartbeat keeps an idle event stream from being cut by proxies.
+const streamHeartbeat = 25 * time.Second
+
+// streamHandler pushes a server-sent "change" event whenever the store's data
+// changes, so the page refetches straight away instead of waiting to poll. The
+// event carries only the generation; the page re-reads what it shows.
+func streamHandler(st *store.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		rc := http.NewResponseController(w)
+		// The stream outlives the server's WriteTimeout by design.
+		if err := rc.SetWriteDeadline(time.Time{}); err != nil {
+			slog.Debug("stream deadline", "err", err)
+		}
+		h := w.Header()
+		h.Set("Content-Type", "text/event-stream")
+		h.Set("Cache-Control", "no-store")
+		h.Set("X-Accel-Buffering", "no")
+		ch, stop := st.Subscribe()
+		defer stop()
+		send := func(format string, args ...any) bool {
+			if _, err := fmt.Fprintf(w, format, args...); err != nil {
+				return false
+			}
+			return rc.Flush() == nil
+		}
+		if !send("retry: 3000\nevent: hello\ndata: %d\n\n", st.Gen()) {
+			return
+		}
+		beat := time.NewTicker(streamHeartbeat)
+		defer beat.Stop()
+		for {
+			select {
+			case <-r.Context().Done():
+				return
+			case <-st.Done():
+				return
+			case <-ch:
+				if !send("event: change\ndata: %d\n\n", st.Gen()) {
+					return
+				}
+			case <-beat.C:
+				if !send(": ping\n\n") {
+					return
+				}
+			}
+		}
+	}
 }
