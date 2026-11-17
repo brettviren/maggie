@@ -10,10 +10,12 @@ import {
   EMPTY_FILTERS,
   type Filters,
   type GroupMode,
+  SEARCH_SCOPES,
   toGroupMode,
+  toSearchScope,
   uniqueSorted,
 } from "@/lib/filter"
-import { useIssues } from "@/queries"
+import { useCommentIndex, useIssues } from "@/queries"
 
 const FIELD =
   "rounded-md border border-line bg-bg px-2 py-1 text-sm text-text focus:border-accent focus:outline-none"
@@ -81,10 +83,11 @@ export function FilterBar({
   )
 
   const labels = useMemo(() => allLabels(all), [all])
+  const comments = useCommentIndex(filters)
 
   const matched = useMemo(
-    () => applyFilters(all, filters).length,
-    [all, filters],
+    () => applyFilters(all, filters, comments).length,
+    [all, filters, comments],
   )
 
   const set = (patch: Partial<Filters>) => {
@@ -96,9 +99,27 @@ export function FilterBar({
   return (
     <div className="flex flex-col gap-2 border-b border-line bg-bg px-5 py-3">
       <div className="flex flex-wrap items-center gap-2">
+        <select
+          className={FIELD}
+          value={filters.scope}
+          title="which text the search box matches"
+          onChange={(e) => {
+            set({ scope: toSearchScope(e.target.value) ?? "title" })
+          }}
+        >
+          {SEARCH_SCOPES.map((s) => (
+            <option key={s} value={s}>
+              search: {s}
+            </option>
+          ))}
+        </select>
         <input
           className={`${FIELD} w-64`}
-          placeholder="search e.g. maggie-*"
+          placeholder={
+            filters.scope === "title"
+              ? "search e.g. maggie-*"
+              : `search ${filters.scope}`
+          }
           value={filters.idGlob || filters.text}
           onChange={(e) => {
             const v = e.target.value

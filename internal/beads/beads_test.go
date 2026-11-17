@@ -457,3 +457,56 @@ func TestRunHonoursCallerCancellation(t *testing.T) {
 		t.Fatal("Ready survived a cancelled context, want error")
 	}
 }
+
+func TestCommentsArgs(t *testing.T) {
+	c, argv := newStub(t, "1")
+	if _, err := c.Comments(t.Context()); err != nil {
+		t.Fatalf("Comments: %v", err)
+	}
+	want := []string{"export"}
+	if got := readArgv(t, argv); !slices.Equal(got, want) {
+		t.Errorf("argv = %q, want %q", got, want)
+	}
+}
+
+func TestCommentsParsesExport(t *testing.T) {
+	c, _ := newStub(t, "1")
+	t.Setenv(stubOutEnv, strings.Join([]string{
+		`{"_type":"issue","id":"mg-1","title":"a","comments":[{"text":"first"},{"text":"second"}]}`,
+		``,
+		`{"_type":"issue","id":"mg-2","title":"no comments","comment_count":0}`,
+		`{"_type":"memory","id":"m-1","comments":[{"text":"not an issue"}]}`,
+		`{"id":"mg-3","comments":[{"text":"untyped row"}]}`,
+	}, "\n"))
+	got, err := c.Comments(t.Context())
+	if err != nil {
+		t.Fatalf("Comments: %v", err)
+	}
+	want := map[string][]string{
+		"mg-1": {"first", "second"},
+		"mg-3": {"untyped row"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for id, texts := range want {
+		if !slices.Equal(got[id], texts) {
+			t.Errorf("%s = %q, want %q", id, got[id], texts)
+		}
+	}
+}
+
+func TestCommentsRejectsMalformedExport(t *testing.T) {
+	c, _ := newStub(t, "1")
+	t.Setenv(stubOutEnv, "{not json")
+	if _, err := c.Comments(t.Context()); err == nil {
+		t.Fatal("Comments: want an error for malformed JSONL")
+	}
+}
+
+func TestCommentsSurfacesBdFailure(t *testing.T) {
+	c, _ := newStub(t, "fail")
+	if _, err := c.Comments(t.Context()); err == nil {
+		t.Fatal("Comments: want an error when bd fails")
+	}
+}

@@ -17,7 +17,9 @@ import {
   rootId,
   sortIssues,
   sortToParams,
+  scopeNeedsComments,
   toGroupMode,
+  toSearchScope,
   toSortDir,
   toSortKey,
   uniqueSorted,
@@ -147,6 +149,77 @@ describe("applyFilters", () => {
   })
 })
 
+const ids = (got: Issue[]) => got.map((i) => i.id)
+
+describe("applyFilters search scope", () => {
+  const rows = [
+    issue("mg-1", {
+      title: "Fix login",
+      description: "The OAuth redirect loops",
+      notes: "check cookie domain",
+    }),
+    issue("mg-2", { title: "Add index", notes: "redirect is unrelated" }),
+    issue("mg-3", { title: "Cookie banner" }),
+  ]
+
+  const comments = { "mg-2": ["seen on staging"], "mg-3": ["OAuth too?"] }
+
+  it("defaults to id and title only", () => {
+    expect(ids(applyFilters(rows, filters({ text: "redirect" })))).toEqual([])
+    expect(ids(applyFilters(rows, filters({ text: "mg-3" })))).toEqual(["mg-3"])
+  })
+
+  it("searches the description", () => {
+    const f = filters({ text: "oauth", scope: "description" })
+    expect(ids(applyFilters(rows, f, comments))).toEqual(["mg-1"])
+  })
+
+  // The id is a title-scope match; a description search must not hit on it.
+  it("does not match the id outside the title and all scopes", () => {
+    const f = filters({ text: "mg-1", scope: "description" })
+    expect(applyFilters(rows, f)).toEqual([])
+  })
+
+  it("searches the notes", () => {
+    const f = filters({ text: "REDIRECT", scope: "notes" })
+    expect(ids(applyFilters(rows, f))).toEqual(["mg-2"])
+  })
+
+  it("searches comments from the comment index", () => {
+    const f = filters({ text: "staging", scope: "comments" })
+    expect(ids(applyFilters(rows, f, comments))).toEqual(["mg-2"])
+  })
+
+  it("matches no comment while the index is absent", () => {
+    const f = filters({ text: "staging", scope: "comments" })
+    expect(applyFilters(rows, f)).toEqual([])
+  })
+
+  it("searches every field in the all scope", () => {
+    const f = filters({ text: "oauth", scope: "all" })
+    expect(ids(applyFilters(rows, f, comments))).toEqual(["mg-1", "mg-3"])
+    const byTitle = filters({ text: "cookie", scope: "all" })
+    expect(ids(applyFilters(rows, byTitle, comments))).toEqual(["mg-1", "mg-3"])
+  })
+
+  it("leaves the scope irrelevant when the text is empty", () => {
+    expect(applyFilters(rows, filters({ scope: "notes" }))).toHaveLength(3)
+  })
+})
+
+describe("scopeNeedsComments", () => {
+  it("is true only for a non-empty comments or all search", () => {
+    expect(scopeNeedsComments(filters({ text: "x", scope: "comments" }))).toBe(
+      true,
+    )
+    expect(scopeNeedsComments(filters({ text: "x", scope: "all" }))).toBe(true)
+    expect(scopeNeedsComments(filters({ text: " ", scope: "all" }))).toBe(false)
+    expect(scopeNeedsComments(filters({ text: "x", scope: "notes" }))).toBe(
+      false,
+    )
+  })
+})
+
 describe("sortIssues", () => {
   const rows = [
     issue("b", { priority: 2, title: "Beta" }),
@@ -236,6 +309,7 @@ describe("filtersToParams", () => {
   it("emits nothing for default filters, so a shared URL stays bare", () => {
     expect(filtersToParams(EMPTY_FILTERS)).toEqual({
       q: undefined,
+      qin: undefined,
       idg: undefined,
       st: undefined,
       pri: undefined,
@@ -329,6 +403,24 @@ describe("value narrowing", () => {
     expect(toGroupMode("label")).toBe("label")
     expect(toGroupMode("none")).toBe("none")
     expect(toGroupMode("kanban")).toBeUndefined()
+  })
+
+  it("narrows search scopes", () => {
+    expect(toSearchScope("notes")).toBe("notes")
+    expect(toSearchScope("all")).toBe("all")
+    expect(toSearchScope("labels")).toBeUndefined()
+  })
+})
+
+describe("search scope params", () => {
+  it("defaults to the title scope", () => {
+    expect(paramsToFilters({}).scope).toBe("title")
+  })
+
+  it("round-trips a non-default scope", () => {
+    const f = filters({ text: "x", scope: "comments" })
+    expect(filtersToParams(f).qin).toBe("comments")
+    expect(paramsToFilters(filtersToParams(f))).toEqual(f)
   })
 })
 

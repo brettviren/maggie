@@ -168,6 +168,18 @@ func routes(bd *beads.Client, actors []string, web fs.FS) *http.ServeMux {
 		}
 		return bd.Show(r.Context(), id)
 	}))
+	mux.HandleFunc("/api/comments", func(w http.ResponseWriter, r *http.Request) {
+		byID, err := bd.Comments(r.Context())
+		if err != nil {
+			slog.Error("comments", "err", err)
+			http.Error(w, "comments failed", http.StatusBadGateway)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(byID); err != nil {
+			slog.Error("comments encode", "err", err)
+		}
+	})
 	mux.HandleFunc("/api/actors", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(actors); err != nil {

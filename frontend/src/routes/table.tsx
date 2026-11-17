@@ -12,7 +12,7 @@ import {
   sortIssues,
   sortToParams,
 } from "@/lib/filter"
-import { useIssues } from "@/queries"
+import { useCommentIndex, useIssues } from "@/queries"
 
 export const Route = createFileRoute("/table")({
   component: Table,
@@ -26,10 +26,11 @@ function Table() {
 
   const filters = paramsToFilters(search)
   const sort = paramsToSort(search)
+  const comments = useCommentIndex(filters)
 
   const rows = useMemo(
-    () => sortIssues(applyFilters(data ?? [], filters), sort),
-    [data, filters, sort],
+    () => sortIssues(applyFilters(data ?? [], filters, comments), sort),
+    [data, filters, comments, sort],
   )
 
   const groups = useMemo(

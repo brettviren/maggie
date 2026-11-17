@@ -8,10 +8,34 @@ export const ALL_STATUSES: Status[] = [
   "closed",
 ]
 
+// SearchScope picks which bead text the free-text search reads. "title" also
+// matches the id, as does "all", which reads every listed field.
+export type SearchScope = "title" | "description" | "notes" | "comments" | "all"
+
+export const SEARCH_SCOPES: SearchScope[] = [
+  "title",
+  "description",
+  "notes",
+  "comments",
+  "all",
+]
+
+// CommentIndex maps an issue id to its comment bodies. The issue list carries
+// only comment counts, so comment search reads this separately fetched index.
+export type CommentIndex = Partial<Record<string, string[]>>
+
+// scopeNeedsComments reports whether a search over the given filters has to
+// read comment text, so the comment index is fetched only when it is used.
+export function scopeNeedsComments(f: Filters): boolean {
+  return f.text.trim() !== "" && (f.scope === "comments" || f.scope === "all")
+}
+
 // An "all" value for priority, type, assignee or label means "no filter".
 export interface Filters {
-  // matches id or title (substring, case-insensitive)
+  // substring (case-insensitive) matched against the fields `scope` selects
   text: string
+  // which fields `text` is matched against
+  scope: SearchScope
   // glob on id, e.g. "mulga-siv-*"
   idGlob: string
   // included statuses; full set = no filter
@@ -27,6 +51,7 @@ const STATUS_SET = new Set<string>(ALL_STATUSES)
 
 export const EMPTY_FILTERS: Filters = {
   text: "",
+  scope: "title",
   idGlob: "",
   statuses: [...ALL_STATUSES],
   priority: "all",
@@ -64,7 +89,26 @@ export function globToRegExp(glob: string): RegExp {
   return new RegExp(`^${escaped}$`, "i")
 }
 
-export function applyFilters(issues: Issue[], f: Filters): Issue[] {
+// SCOPE_FIELDS lists, per scope, the issue text a search in that scope reads.
+const SCOPE_FIELDS: Record<
+  SearchScope,
+  (i: Issue, comments: CommentIndex) => (string | undefined)[]
+> = {
+  title: (i) => [i.id, i.title],
+  description: (i) => [i.description],
+  notes: (i) => [i.notes],
+  comments: (i, c) => c[i.id] ?? [],
+  all: (i, c) => [i.id, i.title, i.description, i.notes, ...(c[i.id] ?? [])],
+}
+
+// applyFilters keeps the issues matching every filter. `comments` supplies the
+// comment text for the "comments" and "all" scopes; without it those scopes
+// match no comment.
+export function applyFilters(
+  issues: Issue[],
+  f: Filters,
+  comments: CommentIndex = {},
+): Issue[] {
   const text = f.text.trim().toLowerCase()
   const glob = f.idGlob.trim()
   const re = glob ? globToRegExp(glob) : null
@@ -72,9 +116,8 @@ export function applyFilters(issues: Issue[], f: Filters): Issue[] {
   return issues.filter((i) => {
     if (
       text &&
-      !(
-        i.id.toLowerCase().includes(text) ||
-        i.title.toLowerCase().includes(text)
+      !SCOPE_FIELDS[f.scope](i, comments).some((v) =>
+        v?.toLowerCase().includes(text),
       )
     ) {
       return false
@@ -142,6 +185,8 @@ const SORT_KEYS: SortKey[] = [
 // bare URL means "defaults".
 export interface TableSearch {
   q?: string
+  // search scope; absent = title
+  qin?: SearchScope
   idg?: string
   // comma-separated statuses; absent = all
   st?: string
@@ -163,6 +208,7 @@ export function paramsToFilters(s: TableSearch): Filters {
 
   return {
     text: s.q ?? "",
+    scope: s.qin ?? "title",
     idGlob: s.idg ?? "",
     statuses: sts.length ? sts : [...ALL_STATUSES],
     priority: s.pri ?? "all",
@@ -181,7 +227,7 @@ export function paramsToSort(s: TableSearch): Sort {
 
 const GROUP_MODES: GroupMode[] = ["none", "epic", "label"]
 
-// toSortKey / toSortDir / toGroupMode narrow raw URL or form values onto their
+// toSortKey / toSortDir / toGroupMode / toSearchScope narrow raw URL or form values onto their
 // domain type, returning undefined when the value is not one of them. They are
 // the parse boundary, so unknown input is the point.
 /* oxlint-disable anti-slop/no-unknown-parameters -- these functions are the parser */
@@ -201,6 +247,10 @@ export function toGroupMode(v: unknown): GroupMode | undefined {
   return GROUP_MODES.find((m) => m === v)
 }
 
+export function toSearchScope(v: unknown): SearchScope | undefined {
+  return SEARCH_SCOPES.find((m) => m === v)
+}
+
 /* oxlint-enable anti-slop/no-unknown-parameters */
 
 // filtersToParams / sortToParams emit only non-default values so shared URLs
@@ -208,6 +258,7 @@ export function toGroupMode(v: unknown): GroupMode | undefined {
 export function filtersToParams(f: Filters): TableSearch {
   return {
     q: f.text || undefined,
+    qin: f.scope === "title" ? undefined : f.scope,
     idg: f.idGlob || undefined,
     st:
       f.statuses.length === ALL_STATUSES.length

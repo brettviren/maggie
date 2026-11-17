@@ -5,12 +5,18 @@ import {
   addComment,
   addDep,
   fetchActors,
+  fetchComments,
   fetchGraph,
   fetchIssue,
   fetchIssues,
   fetchReady,
   updateIssue,
 } from "@/api"
+import {
+  type CommentIndex,
+  type Filters,
+  scopeNeedsComments,
+} from "@/lib/filter"
 
 const REFETCH_MS = 10_000
 
@@ -20,6 +26,19 @@ export function useIssues() {
     queryFn: fetchIssues,
     refetchInterval: REFETCH_MS,
   })
+}
+
+// useCommentIndex fetches the comment text that comment-scoped search reads.
+// The fetch is a full export, so it runs only while such a search is active.
+export function useCommentIndex(filters: Filters): CommentIndex | undefined {
+  const { data } = useQuery({
+    queryKey: ["comments"],
+    queryFn: fetchComments,
+    enabled: scopeNeedsComments(filters),
+    refetchInterval: REFETCH_MS,
+  })
+
+  return data
 }
 
 export function useReady() {
@@ -69,6 +88,7 @@ function useIssueWrites() {
     void qc.invalidateQueries({ queryKey: ["ready"] })
     void qc.invalidateQueries({ queryKey: ["graph"] })
     void qc.invalidateQueries({ queryKey: ["issue", id] })
+    void qc.invalidateQueries({ queryKey: ["comments"] })
   }
 
   return { settle }

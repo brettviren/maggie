@@ -5,7 +5,12 @@ import type { Issue, Status, UpdatePayload } from "@/api"
 import { IssueCard } from "@/components/issue-card"
 import { useActor } from "@/lib/actor"
 import { applyFilters, paramsToFilters } from "@/lib/filter"
-import { useActors, useIssues, useUpdateIssue } from "@/queries"
+import {
+  useActors,
+  useCommentIndex,
+  useIssues,
+  useUpdateIssue,
+} from "@/queries"
 
 export const Route = createFileRoute("/board")({
   component: Board,
@@ -48,10 +53,11 @@ function Board() {
   const [claim, setClaim] = useState<Claim | null>(null)
 
   const filters = paramsToFilters(search)
+  const comments = useCommentIndex(filters)
 
   const items = useMemo(
-    () => applyFilters(data ?? [], filters),
-    [data, filters],
+    () => applyFilters(data ?? [], filters, comments),
+    [data, filters, comments],
   )
 
   const select = async (id: string) => {

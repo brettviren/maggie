@@ -23,7 +23,7 @@ import { useEffect, useMemo, useRef, useState } from "react"
 import type { Issue, Status } from "@/api"
 import { labelHue } from "@/components/badges"
 import { applyFilters, paramsToFilters } from "@/lib/filter"
-import { useGraph, useIssues } from "@/queries"
+import { useCommentIndex, useGraph, useIssues } from "@/queries"
 
 const STATUS_VAR = {
   open: "var(--color-st-open)",
@@ -63,10 +63,11 @@ function Graph() {
   // filters as the table and board. The result has to be referentially stable:
   // a fresh node array each render restarts the simulation before it can tick.
   const filters = useMemo(() => paramsToFilters(search), [search])
+  const comments = useCommentIndex(filters)
 
   const filtered = useMemo(
-    () => applyFilters(issues ?? [], filters),
-    [issues, filters],
+    () => applyFilters(issues ?? [], filters, comments),
+    [issues, filters, comments],
   )
 
   const hasLabels = useMemo(

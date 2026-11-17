@@ -5,7 +5,10 @@
 package beads
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -197,6 +200,58 @@ func (c *Client) AddDep(ctx context.Context, issueID, dependsOn, depType, actor 
 	default:
 		return fmt.Errorf("addDep: bad type %q", depType)
 	}
+}
+
+// Comments returns every issue's comment bodies keyed by issue id, for
+// full-text search. `bd list --json` carries only comment counts and `bd
+// comments` takes a single id, so this reads the JSONL stream of `bd export`,
+// which is the one bulk read that includes comment text. Issues without
+// comments are omitted.
+func (c *Client) Comments(ctx context.Context) (map[string][]string, error) {
+	out, err := c.run(ctx, "export")
+	if err != nil {
+		return nil, err
+	}
+	return parseComments(out)
+}
+
+// exportRow is the slice of a `bd export` JSONL record that search needs.
+type exportRow struct {
+	Type     string `json:"_type"`
+	ID       string `json:"id"`
+	Comments []struct {
+		Text string `json:"text"`
+	} `json:"comments"`
+}
+
+func parseComments(out []byte) (map[string][]string, error) {
+	byID := map[string][]string{}
+	sc := bufio.NewScanner(bytes.NewReader(out))
+	// A record holds a whole issue, description and comments included, so it
+	// can far exceed bufio's 64KiB default line limit.
+	sc.Buffer(nil, 64<<20)
+	for sc.Scan() {
+		line := bytes.TrimSpace(sc.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		var row exportRow
+		if err := json.Unmarshal(line, &row); err != nil {
+			return nil, fmt.Errorf("export: %w", err)
+		}
+		if (row.Type != "" && row.Type != "issue") || row.ID == "" || len(row.Comments) == 0 {
+			continue
+		}
+		texts := make([]string, 0, len(row.Comments))
+		for _, cm := range row.Comments {
+			texts = append(texts, cm.Text)
+		}
+		byID[row.ID] = texts
+	}
+	if err := sc.Err(); err != nil {
+		return nil, fmt.Errorf("export: %w", err)
+	}
+	return byID, nil
 }
 
 // Edge is a single directed dependency between two issues. Dashed edges are

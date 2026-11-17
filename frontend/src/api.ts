@@ -73,6 +73,13 @@ export async function fetchGraph(): Promise<Edge[]> {
   return await getJSON<Edge[]>("/api/graph")
 }
 
+// fetchComments returns every issue's comment bodies keyed by issue id.
+export async function fetchComments(): Promise<
+  Partial<Record<string, string[]>>
+> {
+  return await getJSON<Partial<Record<string, string[]>>>("/api/comments")
+}
+
 export async function fetchActors(): Promise<string[]> {
   return await getJSON<string[]>("/api/actors")
 }

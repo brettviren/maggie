@@ -16,6 +16,7 @@ import {
   paramsToFilters,
   type TableSearch,
   toGroupMode,
+  toSearchScope,
   toSortDir,
   toSortKey,
 } from "@/lib/filter"
@@ -38,6 +39,7 @@ export const Route = createRootRoute({
   validateSearch: (search: Record<string, unknown>): RootSearch => ({
     issue: str(search.issue),
     q: str(search.q),
+    qin: toSearchScope(search.qin),
     idg: str(search.idg),
     st: str(search.st),
     pri: search.pri === undefined ? undefined : Number(search.pri),

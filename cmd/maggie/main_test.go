@@ -453,6 +453,34 @@ func TestGraphEndpointUpstreamFailure(t *testing.T) {
 	}
 }
 
+func TestCommentsEndpoint(t *testing.T) {
+	c, url, argv := newServer(t, "1", nil)
+	t.Setenv(stubOutEnv, `{"_type":"issue","id":"mg-1","comments":[{"text":"hi"}]}`+"\n")
+
+	resp := get(t, c, url+"/api/comments")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var got map[string][]string
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !slices.Equal(got["mg-1"], []string{"hi"}) || len(got) != 1 {
+		t.Errorf("comments = %v, want map[mg-1:[hi]]", got)
+	}
+	if a := readArgv(t, argv); !slices.Equal(a, []string{"export"}) {
+		t.Errorf("argv = %q, want [export]", a)
+	}
+}
+
+func TestCommentsEndpointUpstreamFailure(t *testing.T) {
+	c, url, _ := newServer(t, "fail", nil)
+	resp := get(t, c, url+"/api/comments")
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Errorf("status = %d, want 502", resp.StatusCode)
+	}
+}
+
 func TestReadyEndpoint(t *testing.T) {
 	c, url, argv := newServer(t, "1", nil)
 	t.Setenv(stubOutEnv, `{"issues":[]}`)
