@@ -112,12 +112,33 @@ All configuration is environment variables. There is no config file.
 
 | Var | Default | Description |
 |-----|---------|-------------|
-| `MAGGIE_ADDR` | `:8088` | Listen address |
+| `MAGGIE_ADDR` | `:8088` | Listen address: a TCP `host:port`, or `unix:PATH` for a Unix socket (see below) |
 | `MAGGIE_BEADS_DIR` | `.` | Working directory containing `.beads/` |
 | `MAGGIE_BD_BIN` | `bd` | Path to the `bd` binary |
 | `MAGGIE_ACTORS` | — | Comma-separated identity roster for the edit picker |
 | `MAGGIE_LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error` |
 | `MAGGIE_RESYNC` | `5m` | How often to re-read the whole workspace with `bd export`, to pick up changes the events journal does not record, such as a `bd dolt pull` |
+
+### Listening on a Unix socket
+
+For a personal instance, a Unix socket avoids opening a port at all:
+
+```bash
+MAGGIE_ADDR=unix:$XDG_RUNTIME_DIR/maggie.sock maggie
+```
+
+The socket is created mode `0600`, so only your user can connect. A socket
+left behind by a maggie that did not shut down cleanly is replaced on start.
+maggie refuses to start if another server is still answering on that path,
+or if the path is not a socket. The socket is removed on shutdown.
+
+Browsers cannot open a socket themselves. To reach maggie from a browser,
+forward the socket over ssh to a local port, or put it behind a reverse
+proxy that can talk to a Unix socket:
+
+```bash
+ssh -N -L 8088:/run/user/1000/maggie.sock workhost   # then open http://localhost:8088
+```
 
 ### Live updates and the events journal
 
@@ -169,7 +190,7 @@ make dev    # Vite on :3001, proxying /api -> :8088, with hot reload (terminal 2
 
 ## Security
 
-**Maggie has no authentication.** Anyone who can reach the port can read and modify every issue in the store.
+**Maggie has no authentication.** Anyone who can reach the port can read and modify every issue in the store. On a shared machine, listen on a Unix socket (`MAGGIE_ADDR=unix:PATH`) so that only your user can connect.
 
 Run it on a trusted network, or behind an authenticating reverse proxy that terminates TLS. If you use the compose stack, keep the Dolt port (`3307`) internal and never publish it.
 

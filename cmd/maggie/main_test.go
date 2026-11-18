@@ -783,11 +783,138 @@ func getWhenUp(base string) int {
 }
 
 func TestServeReturnsListenError(t *testing.T) {
-	// Port 1 is privileged, so ListenAndServe fails immediately and the error
+	// Port 1 is privileged, so listening fails immediately and the error
 	// must surface rather than being mistaken for a clean shutdown.
 	srv := &http.Server{Addr: "127.0.0.1:1", ReadHeaderTimeout: time.Second}
 	if err := serve(t.Context(), srv); err == nil {
 		t.Error("serve = nil, want the listen failure")
+	}
+}
+
+// socketPath is a fresh Unix socket path, kept short: sun_path holds ~108 bytes
+// and t.TempDir's names can approach that.
+func socketPath(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "mg")
+	if err != nil {
+		t.Fatalf("temp dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return filepath.Join(dir, "m.sock")
+}
+
+// unixClient sends every request to the socket at path, whatever the URL's host.
+func unixClient(path string) *http.Client {
+	return &http.Client{Transport: &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "unix", path)
+		},
+	}}
+}
+
+func TestServeUnixSocket(t *testing.T) {
+	path := socketPath(t)
+	srv := &http.Server{
+		Addr:              unixPrefix + path,
+		ReadHeaderTimeout: time.Second,
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusTeapot)
+		}),
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- serve(ctx, srv) }()
+
+	client := unixClient(path)
+	var code int
+	for range 200 {
+		resp, err := client.Get("http://maggie/")
+		if err != nil {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		code = resp.StatusCode
+		_ = resp.Body.Close()
+		break
+	}
+	if code != http.StatusTeapot {
+		t.Fatalf("GET over the socket = %d, want %d", code, http.StatusTeapot)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat socket: %v", err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o600 {
+		t.Errorf("socket mode = %v, want 0600", perm)
+	}
+
+	cancel()
+	if err := <-done; err != nil {
+		t.Errorf("serve after cancel = %v, want nil", err)
+	}
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		t.Errorf("socket still present after shutdown (err=%v)", err)
+	}
+}
+
+func TestListenAddrReplacesStaleSocket(t *testing.T) {
+	path := socketPath(t)
+	old, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	// Leave the file behind, as a crashed maggie would.
+	old.(*net.UnixListener).SetUnlinkOnClose(false)
+	_ = old.Close()
+
+	ln, err := listenAddr(unixPrefix + path)
+	if err != nil {
+		t.Fatalf("listenAddr over a stale socket = %v, want it replaced", err)
+	}
+	_ = ln.Close()
+}
+
+func TestListenAddrRefusesLiveSocket(t *testing.T) {
+	path := socketPath(t)
+	live, err := listenAddr(unixPrefix + path)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = live.Close() }()
+	go func() {
+		for {
+			conn, err := live.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+	if ln, err := listenAddr(unixPrefix + path); err == nil {
+		_ = ln.Close()
+		t.Fatal("listenAddr on a live socket = nil, want an in-use error")
+	}
+}
+
+func TestListenAddrRefusesNonSocket(t *testing.T) {
+	path := socketPath(t)
+	if err := os.WriteFile(path, []byte("keep me"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if ln, err := listenAddr(unixPrefix + path); err == nil {
+		_ = ln.Close()
+		t.Fatal("listenAddr on a regular file = nil, want an error")
+	}
+	if b, err := os.ReadFile(path); err != nil || string(b) != "keep me" {
+		t.Errorf("regular file was disturbed: %q, %v", b, err)
+	}
+}
+
+func TestListenAddrEmptyUnixPath(t *testing.T) {
+	if ln, err := listenAddr(unixPrefix); err == nil {
+		_ = ln.Close()
+		t.Fatal("listenAddr(\"unix:\") = nil, want an error")
 	}
 }
 

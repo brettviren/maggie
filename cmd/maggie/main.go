@@ -11,6 +11,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -130,13 +131,70 @@ func httpServer(addr string, h http.Handler) *http.Server {
 // mutation lands rather than being killed halfway through.
 const shutdownGrace = 30 * time.Second
 
+// unixPrefix marks a MAGGIE_ADDR that names a Unix socket rather than a TCP
+// host:port, e.g. unix:/run/user/1000/maggie.sock.
+const unixPrefix = "unix:"
+
+// listenAddr opens the listener for addr: a TCP host:port, or unix:PATH for a
+// Unix socket. A socket is created mode 0600, so only maggie's own user can
+// connect, which is the access control a local or ssh-forwarded UI needs
+// without opening a port. Go removes the socket file when the listener closes.
+func listenAddr(addr string) (net.Listener, error) {
+	path, ok := strings.CutPrefix(addr, unixPrefix)
+	if !ok {
+		return net.Listen("tcp", addr)
+	}
+	if path == "" {
+		return nil, errors.New("MAGGIE_ADDR unix: needs a socket path")
+	}
+	if err := clearStaleSocket(path); err != nil {
+		return nil, err
+	}
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		_ = ln.Close()
+		return nil, fmt.Errorf("restrict %s: %w", path, err)
+	}
+	return ln, nil
+}
+
+// clearStaleSocket removes a socket left behind by a maggie that did not shut
+// down cleanly, so a restart does not fail with "address already in use". It
+// refuses to touch a socket something still answers on, or a path that is not
+// a socket at all.
+func clearStaleSocket(path string) error {
+	fi, err := os.Lstat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if fi.Mode()&fs.ModeSocket == 0 {
+		return fmt.Errorf("%s exists and is not a socket", path)
+	}
+	if conn, err := net.DialTimeout("unix", path, time.Second); err == nil {
+		_ = conn.Close()
+		return fmt.Errorf("%s is in use by another server", path)
+	}
+	return os.Remove(path)
+}
+
 // serve runs srv until it fails or ctx is cancelled, then drains in-flight
 // requests. ErrServerClosed is Shutdown's documented return once the drain has
 // been asked for, so it reports success rather than a failure to exit non-zero.
+// srv.Addr is read by listenAddr, so it may name a Unix socket.
 func serve(ctx context.Context, srv *http.Server) error {
+	ln, err := listenAddr(srv.Addr)
+	if err != nil {
+		return err
+	}
 	errCh := make(chan error, 1)
 	go func() {
-		err := srv.ListenAndServe()
+		err := srv.Serve(ln)
 		if errors.Is(err, http.ErrServerClosed) {
 			err = nil
 		}
